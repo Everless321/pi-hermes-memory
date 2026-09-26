@@ -126,9 +126,16 @@ type DirectRequestHeaders = DirectReviewAuth["headers"];
  * gateway attributes the background request to (#250). */
 export type DirectReviewContext = Pick<ExtensionContext, "model" | "modelRegistry" | "sessionManager">;
 
-// OpenCode rejects every request missing its per-conversation routing header.
-// Mirrors pi-coding-agent's internal getSessionHeaders, which the package does
-// not export, so the rule is restated here instead of called.
+// Restated from pi-coding-agent's internal getSessionHeaders, read at
+// dist/core/provider-attribution.js in v0.87.1. The package exports no seam for
+// it, and pi-ai only grew its own injection in v0.86.0 while this extension
+// declares a 0.80.6 floor. Re-read that file when bumping the floor past
+// 0.86.0, and check that pi did not add a provider or change the client value.
+//
+// The header is set directly rather than through StreamOptions.sessionId
+// because pi-ai's openai-responses default of sendSessionIdHeader is true, so
+// passing sessionId would also start sending an OpenAI session_id header to
+// every OpenAI Responses user.
 const OPENCODE_SESSION_HEADER = "x-opencode-session";
 const OPENCODE_CLIENT_HEADER = "x-opencode-client";
 const OPENCODE_HOST = "opencode.ai";
@@ -151,9 +158,14 @@ function readSessionId(sessionManager: DirectReviewContext["sessionManager"]): s
   }
 }
 
-/** Returns a copy whenever the session header is added: the registry hands out
- * a shared object, and the credential-rotation comparison below must not read
- * hermes' own header as a credential change. */
+/** Returns a copy whenever a header is added: the registry hands out a shared
+ * object, and the credential-rotation comparison below must not read hermes'
+ * own header as a credential change.
+ *
+ * An operator-configured session header short-circuits both additions, so that
+ * request carries no client header. pi keeps its client header in that case.
+ * The divergence is deliberate, because honouring the operator's session id
+ * completely is the more predictable contract. */
 function directRequestHeaders(
   model: Model<Api>,
   headers: DirectRequestHeaders,

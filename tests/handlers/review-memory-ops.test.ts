@@ -1796,3 +1796,114 @@ describe("opencode session header (#250)", () => {
     assert.ok(store.getMemoryEntries().some((entry) => entry.includes("chain hop reached opencode")));
   });
 });
+
+describe("opencode scoping and session-id degradation", () => {
+  function capturingRun(model: Model<Api>, sessionManager: unknown) {
+    const captured: Array<Record<string, string | null> | undefined> = [];
+    const run = runDirectMemoryCompletion(
+      {
+        model,
+        modelRegistry: {
+          getApiKeyAndHeaders: async () => ({ ok: true as const, apiKey: "sk-test" }),
+          hasConfiguredAuth: () => true,
+          isUsingOAuth: () => false,
+          getAll: () => [model],
+          getAvailable: () => [model],
+        },
+        sessionManager,
+      } as never,
+      null as never,
+      null,
+      { userPrompt: "u", systemPrompt: "s", config: {} },
+      null,
+      null,
+      {
+        completeSimple: (async (_model: unknown, _request: unknown, options: { headers?: Record<string, string | null> }) => {
+          captured.push(options.headers);
+          return { stopReason: "stop", content: [{ type: "text", text: JSON.stringify({ operations: [] }) }] };
+        }) as never,
+      },
+    );
+    return { run, captured };
+  }
+
+  function modelWith(provider: string, baseUrl: string): Model<Api> {
+    return {
+      ...mockModel(false),
+      provider,
+      baseUrl,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 200000,
+      maxTokens: 4096,
+    } as Model<Api>;
+  }
+
+  const ok = { getSessionId: () => "ses_opencode_route" };
+
+  // Removing the baseUrl clause of the scoping rule leaves every other test in
+  // this file green, so it needs its own coverage.
+  it("scopes by baseUrl host when the provider id is not an opencode one", async () => {
+    const { run, captured } = capturingRun(
+      modelWith("my-opencode-proxy", "https://opencode.ai/zen/go/v1"),
+      ok,
+    );
+
+    const result = await run;
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(captured[0]?.["x-opencode-session"], "ses_opencode_route");
+    assert.strictEqual(captured[0]?.["x-opencode-client"], "pi");
+  });
+
+  it("scopes by provider id even when the host is somewhere else", async () => {
+    const { run, captured } = capturingRun(
+      modelWith("opencode-go", "https://gateway.internal.example/v1"),
+      ok,
+    );
+
+    await run;
+
+    assert.strictEqual(captured[0]?.["x-opencode-session"], "ses_opencode_route");
+  });
+
+  it("leaves a foreign provider on a foreign host untouched", async () => {
+    const { run, captured } = capturingRun(
+      modelWith("my-proxy", "https://gateway.internal.example/v1"),
+      ok,
+    );
+
+    await run;
+
+    assert.strictEqual(captured[0]?.["x-opencode-session"], undefined);
+    assert.strictEqual(captured[0]?.["x-opencode-client"], undefined);
+  });
+
+  it("adds no header when the session id is empty", async () => {
+    const { run, captured } = capturingRun(
+      modelWith("opencode-go", "https://opencode.ai/zen/go/v1"),
+      { getSessionId: () => "" },
+    );
+
+    const result = await run;
+
+    assert.strictEqual(result.ok, true, "the attempt still goes out, degraded");
+    assert.strictEqual(captured[0]?.["x-opencode-session"], undefined);
+  });
+
+  it("adds no header and still completes when reading the session id throws", async () => {
+    const { run, captured } = capturingRun(
+      modelWith("opencode-go", "https://opencode.ai/zen/go/v1"),
+      {
+        getSessionId: () => {
+          throw new Error("session gone");
+        },
+      },
+    );
+
+    const result = await run;
+
+    assert.strictEqual(result.ok, true, "a throw here must not break the job");
+    assert.strictEqual(captured[0]?.["x-opencode-session"], undefined);
+  });
+});
