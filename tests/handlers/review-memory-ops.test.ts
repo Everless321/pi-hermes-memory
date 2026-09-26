@@ -45,6 +45,7 @@ describe("buildDirectReviewCompletionOptions", () => {
       },
       "minimal",
       signal,
+      undefined,
     );
 
     assert.strictEqual(options.apiKey, "sk-test");
@@ -61,12 +62,14 @@ describe("buildDirectReviewCompletionOptions", () => {
       { apiKey: "sk-test" },
       "off",
       signal,
+      undefined,
     );
     const nonReasoning = buildDirectReviewCompletionOptions(
       mockModel(false),
       { apiKey: "sk-test" },
       "high",
       signal,
+      undefined,
     );
 
     assert.strictEqual(off.reasoning, undefined);

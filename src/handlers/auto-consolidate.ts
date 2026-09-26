@@ -18,7 +18,7 @@ import { resolveProjectName, resolveProjectStore, type ProjectNameRef, type Proj
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { MemoryStore } from "../store/memory-store.js";
 import { DatabaseManager } from "../store/db.js";
 import {
@@ -30,7 +30,7 @@ import {
 import type { ConsolidationResult, MemoryConfig } from "../types.js";
 import { AGENT_ROOT } from "../paths.js";
 import { execChildPrompt } from "./pi-child-process.js";
-import { runDirectMemoryCompletion, usesDirectTransport } from "./review-memory-ops.js";
+import { runDirectMemoryCompletion, usesDirectTransport, type DirectReviewContext } from "./review-memory-ops.js";
 import { AtomicLockCoordinator } from "../store/atomic-lock-coordinator.js";
 
 type MemoryTarget = "memory" | "user" | "failure";
@@ -183,7 +183,7 @@ export async function triggerConsolidation(
   timeoutMs: number = DEFAULT_CONSOLIDATION_TIMEOUT_MS,
   toolTarget: ToolMemoryTarget = target,
   llmConfig: ConsolidationLlmConfig = {},
-  directCtx: Pick<ExtensionContext, "model" | "modelRegistry"> | null = null,
+  directCtx: DirectReviewContext | null = null,
   dbManager: DatabaseManager | null = null,
   projectName?: string | null,
   deps: { runDirectMemoryCompletion?: typeof runDirectMemoryCompletion } = {},
