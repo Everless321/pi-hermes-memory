@@ -2,6 +2,7 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
+import * as http from "node:http";
 import * as path from "node:path";
 import { MemoryStore } from "../../src/store/memory-store.js";
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -44,6 +45,7 @@ describe("buildDirectReviewCompletionOptions", () => {
       },
       "minimal",
       signal,
+      undefined,
     );
 
     assert.strictEqual(options.apiKey, "sk-test");
@@ -60,12 +62,14 @@ describe("buildDirectReviewCompletionOptions", () => {
       { apiKey: "sk-test" },
       "off",
       signal,
+      undefined,
     );
     const nonReasoning = buildDirectReviewCompletionOptions(
       mockModel(false),
       { apiKey: "sk-test" },
       "high",
       signal,
+      undefined,
     );
 
     assert.strictEqual(off.reasoning, undefined);
@@ -1571,5 +1575,335 @@ describe("thinking-channel trust rules (#235)", () => {
     assert.strictEqual(result.ok, true);
     assert.strictEqual(result.appliedCount, 1);
     assert.ok(store.getUserEntries().some((entry) => entry.includes("prefers dark mode")));
+  });
+});
+
+describe("opencode session header (#250)", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "review-250-"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  async function makeStore() {
+    const store = new MemoryStore({
+      memoryDir: tmpDir,
+      memoryCharLimit: 5000,
+      userCharLimit: 5000,
+      autoConsolidate: true,
+    });
+    await store.loadFromDisk();
+    return store;
+  }
+
+  // Stands in for the OpenCode Go gateway, which rejects any request without
+  // x-opencode-session before the model is ever reached.
+  async function startGateway() {
+    const seen: Array<string | string[] | undefined> = [];
+    const server = http.createServer((req, res) => {
+      const session = req.headers["x-opencode-session"];
+      seen.push(session);
+      if (session === undefined) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "missing_session_id" } }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const send = (event: string, data: unknown) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      const body = JSON.stringify({ operations: [{ action: "add", target: "memory", content: "gateway requires a session" }] });
+      send("message_start", {
+        type: "message_start",
+        message: { id: "msg_1", type: "message", role: "assistant", model: "mimo", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } },
+      });
+      send("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+      send("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: body } });
+      send("content_block_stop", { type: "content_block_stop", index: 0 });
+      send("message_delta", { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 5 } });
+      send("message_stop", { type: "message_stop" });
+      res.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("gateway did not bind a TCP port");
+    return { server, seen, baseUrl: `http://127.0.0.1:${address.port}` };
+  }
+
+  it("saves the memory entry the gateway accepted, without stubbing the transport", async () => {
+    const { server, seen, baseUrl } = await startGateway();
+    const store = await makeStore();
+    const model = {
+      id: "mimo-v2.6",
+      name: "mimo-v2.6",
+      provider: "opencode-go",
+      api: "anthropic-messages",
+      baseUrl,
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 200000,
+      maxTokens: 4096,
+    } as Model<Api>;
+
+    try {
+      const result = await runDirectMemoryCompletion(
+        {
+          model,
+          modelRegistry: {
+            getApiKeyAndHeaders: async () => ({ ok: true as const, apiKey: "sk-test" }),
+            hasConfiguredAuth: () => true,
+            isUsingOAuth: () => false,
+            getAll: () => [model],
+            getAvailable: () => [model],
+          },
+          sessionManager: { getSessionId: () => "ses_opencode_route" },
+        } as never,
+        store,
+        null,
+        { userPrompt: "u", systemPrompt: "s", config: {} },
+        null,
+        null,
+      );
+
+      assert.ok(seen.length > 0, "gateway saw no request at all");
+      assert.ok(
+        seen.every((value) => value === "ses_opencode_route"),
+        `every request must carry the pi session id, saw ${JSON.stringify(seen)}`,
+      );
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(result.appliedCount, 1);
+      assert.ok(store.getMemoryEntries().some((entry) => entry.includes("gateway requires a session")));
+    } finally {
+      server.close();
+    }
+  });
+
+  it("leaves other providers and the registry's own header object untouched", async () => {
+    const registryHeaders = { Authorization: "Bearer k" };
+    const captured: Array<Record<string, string | null> | undefined> = [];
+    const model = { ...mockModel(false), provider: "anthropic", api: "anthropic-messages" } as Model<Api>;
+
+    const result = await runDirectMemoryCompletion(
+      {
+        model,
+        modelRegistry: {
+          getApiKeyAndHeaders: async () => ({ ok: true as const, apiKey: "sk-test", headers: registryHeaders }),
+          hasConfiguredAuth: () => true,
+          isUsingOAuth: () => false,
+          getAll: () => [model],
+          getAvailable: () => [model],
+        },
+        sessionManager: { getSessionId: () => "ses_opencode_route" },
+      } as never,
+      null as never,
+      null,
+      { userPrompt: "u", systemPrompt: "s", config: {} },
+      null,
+      null,
+      {
+        completeSimple: (async (_model: unknown, _request: unknown, options: { headers?: Record<string, string | null> }) => {
+          captured.push(options.headers);
+          return { stopReason: "stop", content: [{ type: "text", text: JSON.stringify({ operations: [] }) }] };
+        }) as never,
+      },
+    );
+
+    assert.strictEqual(result.ok, true);
+    assert.deepStrictEqual(captured, [registryHeaders]);
+    assert.deepStrictEqual(registryHeaders, { Authorization: "Bearer k" });
+  });
+
+  it("keeps an operator-configured session header instead of overwriting it", async () => {
+    const configured = { "X-OpenCode-Session": "operator-chosen" };
+    const captured: Array<Record<string, string | null> | undefined> = [];
+    const model = { ...mockModel(false), provider: "opencode-go", api: "openai-completions" } as Model<Api>;
+
+    const result = await runDirectMemoryCompletion(
+      {
+        model,
+        modelRegistry: {
+          getApiKeyAndHeaders: async () => ({ ok: true as const, apiKey: "sk-test", headers: configured }),
+          hasConfiguredAuth: () => true,
+          isUsingOAuth: () => false,
+          getAll: () => [model],
+          getAvailable: () => [model],
+        },
+        sessionManager: { getSessionId: () => "ses_opencode_route" },
+      } as never,
+      null as never,
+      null,
+      { userPrompt: "u", systemPrompt: "s", config: {} },
+      null,
+      null,
+      {
+        completeSimple: (async (_model: unknown, _request: unknown, options: { headers?: Record<string, string | null> }) => {
+          captured.push(options.headers);
+          return { stopReason: "stop", content: [{ type: "text", text: JSON.stringify({ operations: [] }) }] };
+        }) as never,
+      },
+    );
+
+    assert.strictEqual(result.ok, true);
+    assert.deepStrictEqual(captured, [configured]);
+    assert.deepStrictEqual(configured, { "X-OpenCode-Session": "operator-chosen" });
+  });
+
+  it("scopes the header per model so a mixed-provider chain sends it only to opencode", async () => {
+    const primary = { ...mockModel(false), id: "claude-x", provider: "anthropic", api: "anthropic-messages" } as Model<Api>;
+    const fallback = { ...mockModel(false), id: "deepseek", provider: "opencode-go", api: "openai-completions" } as Model<Api>;
+    const attempted: Array<{ model: string; headers: Record<string, string | null> | undefined }> = [];
+    const store = await makeStore();
+
+    const result = await runDirectMemoryCompletion(
+      {
+        model: primary,
+        modelRegistry: {
+          getApiKeyAndHeaders: async () => ({ ok: true as const, apiKey: "sk-test" }),
+          hasConfiguredAuth: () => true,
+          isUsingOAuth: () => false,
+          getAll: () => [primary, fallback],
+          getAvailable: () => [primary, fallback],
+        },
+        sessionManager: { getSessionId: () => "ses_opencode_route" },
+      } as never,
+      store,
+      null,
+      {
+        userPrompt: "u",
+        systemPrompt: "s",
+        config: { llmModelOverride: "anthropic/claude-x", llmFallbackModels: ["opencode-go/deepseek"] },
+      },
+      null,
+      null,
+      {
+        completeSimple: (async (model: { id: string }, _request: unknown, options: { headers?: Record<string, string | null> }) => {
+          attempted.push({ model: model.id, headers: options.headers });
+          if (model.id === "claude-x") return { stopReason: "error", content: [], errorMessage: "upstream busy" };
+          return {
+            stopReason: "stop",
+            content: [{ type: "text", text: JSON.stringify({ operations: [{ action: "add", target: "memory", content: "chain hop reached opencode" }] }) }],
+          };
+        }) as never,
+      },
+    );
+
+    assert.deepStrictEqual(attempted.map((a) => a.model), ["claude-x", "deepseek"]);
+    assert.strictEqual(attempted[0]?.headers?.["x-opencode-session"], undefined);
+    assert.strictEqual(attempted[1]?.headers?.["x-opencode-session"], "ses_opencode_route");
+    assert.ok(store.getMemoryEntries().some((entry) => entry.includes("chain hop reached opencode")));
+  });
+});
+
+describe("opencode scoping and session-id degradation", () => {
+  function capturingRun(model: Model<Api>, sessionManager: unknown) {
+    const captured: Array<Record<string, string | null> | undefined> = [];
+    const run = runDirectMemoryCompletion(
+      {
+        model,
+        modelRegistry: {
+          getApiKeyAndHeaders: async () => ({ ok: true as const, apiKey: "sk-test" }),
+          hasConfiguredAuth: () => true,
+          isUsingOAuth: () => false,
+          getAll: () => [model],
+          getAvailable: () => [model],
+        },
+        sessionManager,
+      } as never,
+      null as never,
+      null,
+      { userPrompt: "u", systemPrompt: "s", config: {} },
+      null,
+      null,
+      {
+        completeSimple: (async (_model: unknown, _request: unknown, options: { headers?: Record<string, string | null> }) => {
+          captured.push(options.headers);
+          return { stopReason: "stop", content: [{ type: "text", text: JSON.stringify({ operations: [] }) }] };
+        }) as never,
+      },
+    );
+    return { run, captured };
+  }
+
+  function modelWith(provider: string, baseUrl: string): Model<Api> {
+    return {
+      ...mockModel(false),
+      provider,
+      baseUrl,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 200000,
+      maxTokens: 4096,
+    } as Model<Api>;
+  }
+
+  const ok = { getSessionId: () => "ses_opencode_route" };
+
+  // Removing the baseUrl clause of the scoping rule leaves every other test in
+  // this file green, so it needs its own coverage.
+  it("scopes by baseUrl host when the provider id is not an opencode one", async () => {
+    const { run, captured } = capturingRun(
+      modelWith("my-opencode-proxy", "https://opencode.ai/zen/go/v1"),
+      ok,
+    );
+
+    const result = await run;
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(captured[0]?.["x-opencode-session"], "ses_opencode_route");
+    assert.strictEqual(captured[0]?.["x-opencode-client"], "pi");
+  });
+
+  it("scopes by provider id even when the host is somewhere else", async () => {
+    const { run, captured } = capturingRun(
+      modelWith("opencode-go", "https://gateway.internal.example/v1"),
+      ok,
+    );
+
+    await run;
+
+    assert.strictEqual(captured[0]?.["x-opencode-session"], "ses_opencode_route");
+  });
+
+  it("leaves a foreign provider on a foreign host untouched", async () => {
+    const { run, captured } = capturingRun(
+      modelWith("my-proxy", "https://gateway.internal.example/v1"),
+      ok,
+    );
+
+    await run;
+
+    assert.strictEqual(captured[0]?.["x-opencode-session"], undefined);
+    assert.strictEqual(captured[0]?.["x-opencode-client"], undefined);
+  });
+
+  it("adds no header when the session id is empty", async () => {
+    const { run, captured } = capturingRun(
+      modelWith("opencode-go", "https://opencode.ai/zen/go/v1"),
+      { getSessionId: () => "" },
+    );
+
+    const result = await run;
+
+    assert.strictEqual(result.ok, true, "the attempt still goes out, degraded");
+    assert.strictEqual(captured[0]?.["x-opencode-session"], undefined);
+  });
+
+  it("adds no header and still completes when reading the session id throws", async () => {
+    const { run, captured } = capturingRun(
+      modelWith("opencode-go", "https://opencode.ai/zen/go/v1"),
+      {
+        getSessionId: () => {
+          throw new Error("session gone");
+        },
+      },
+    );
+
+    const result = await run;
+
+    assert.strictEqual(result.ok, true, "a throw here must not break the job");
+    assert.strictEqual(captured[0]?.["x-opencode-session"], undefined);
   });
 });

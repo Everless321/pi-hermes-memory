@@ -120,15 +120,83 @@ export type ResolvedRequestAuth = Awaited<ReturnType<ReviewModelRegistry["getApi
 
 type DirectReviewAuth = Omit<Extract<ResolvedRequestAuth, { ok: true }>, "ok">;
 
+type DirectRequestHeaders = DirectReviewAuth["headers"];
+
+/** Context the direct transport needs: request routing plus the session the
+ * gateway attributes the background request to (#250). */
+export type DirectReviewContext = Pick<ExtensionContext, "model" | "modelRegistry" | "sessionManager">;
+
+// Restated from pi-coding-agent's internal getSessionHeaders, read at
+// dist/core/provider-attribution.js in v0.87.1. The package exports no seam for
+// it, and pi-ai only grew its own injection in v0.86.0 while this extension
+// declares a 0.80.6 floor. Re-read that file when bumping the floor past
+// 0.86.0, and check that pi did not add a provider or change the client value.
+//
+// The header is set directly rather than through StreamOptions.sessionId
+// because pi-ai's openai-responses default of sendSessionIdHeader is true, so
+// passing sessionId would also start sending an OpenAI session_id header to
+// every OpenAI Responses user.
+const OPENCODE_SESSION_HEADER = "x-opencode-session";
+const OPENCODE_CLIENT_HEADER = "x-opencode-client";
+const OPENCODE_HOST = "opencode.ai";
+
+function matchesHost(baseUrl: string | undefined, expectedHost: string): boolean {
+  try {
+    return new URL(baseUrl ?? "").hostname === expectedHost;
+  } catch {
+    return false;
+  }
+}
+
+/** A missing session id degrades to the pre-#250 behaviour: the attempt still
+ * goes out, and the subprocess fallback owns recovery. */
+function readSessionId(sessionManager: DirectReviewContext["sessionManager"]): string | undefined {
+  try {
+    return sessionManager.getSessionId() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Returns a copy whenever a header is added: the registry hands out a shared
+ * object, and the credential-rotation comparison below must not read hermes'
+ * own header as a credential change.
+ *
+ * An operator-configured session header short-circuits both additions, so that
+ * request carries no client header. pi keeps its client header in that case.
+ * The divergence is deliberate, because honouring the operator's session id
+ * completely is the more predictable contract. */
+function directRequestHeaders(
+  model: Model<Api>,
+  headers: DirectRequestHeaders,
+  sessionId: string | undefined,
+): DirectRequestHeaders {
+  if (!sessionId) return headers;
+  const isOpenCode = model.provider === "opencode"
+    || model.provider === "opencode-go"
+    || matchesHost(model.baseUrl, OPENCODE_HOST);
+  if (!isOpenCode) return headers;
+  const alreadySet = Object.keys(headers ?? {}).some(
+    (key) => key.toLowerCase() === OPENCODE_SESSION_HEADER,
+  );
+  if (alreadySet) return headers;
+  return {
+    ...headers,
+    [OPENCODE_SESSION_HEADER]: sessionId,
+    [OPENCODE_CLIENT_HEADER]: "pi",
+  };
+}
+
 export function buildDirectReviewCompletionOptions(
   model: Model<Api>,
   auth: DirectReviewAuth,
   thinking: ThinkingLevel | undefined,
   signal: AbortSignal,
+  sessionId: string | undefined,
 ): SimpleStreamOptions {
   const options: SimpleStreamOptions = {
     apiKey: auth.apiKey,
-    headers: auth.headers,
+    headers: directRequestHeaders(model, auth.headers, sessionId),
     env: auth.env,
     signal,
   };
@@ -670,7 +738,7 @@ function notifyThinkingChannelProvider(
 }
 
 export async function runDirectMemoryCompletion(
-  ctx: Pick<ExtensionContext, "model" | "modelRegistry">,
+  ctx: DirectReviewContext,
   store: MemoryStore,
   projectStore: MemoryStore | null,
   options: RunDirectMemoryCompletionOptions,
@@ -692,6 +760,10 @@ export async function runDirectMemoryCompletion(
   if (models.length === 0) {
     return { ok: false, appliedCount: 0, fallbackReason: "no_model" };
   }
+
+  // One id per completion, reused across the chain: the whole chain is a single
+  // job for a single conversation.
+  const sessionId = readSessionId(ctx.sessionManager);
 
   // Try each model in chain: primary + llmFallbackModels. Only retry on
   // provider/auth/transport failures; parse errors are prompt-specific so we
@@ -739,7 +811,7 @@ export async function runDirectMemoryCompletion(
       const response = await complete(
         model,
         request,
-        buildDirectReviewCompletionOptions(model, requestAuth, thinking, controller.signal),
+        buildDirectReviewCompletionOptions(model, requestAuth, thinking, controller.signal, sessionId),
       );
       if (response.stopReason === "error" && isAuthRejection(response.errorMessage ?? "")) {
         throw new Error(response.errorMessage ?? "error");
