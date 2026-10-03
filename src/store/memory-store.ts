@@ -74,6 +74,18 @@ export class MemoryStore {
     this.consolidator = fn;
   }
 
+  private readonly mutationListeners = new Set<(target: "memory" | "user" | "failure") => void>();
+
+  /**
+   * Notified after every successful add/replace/remove, independent of the
+   * single mutation observer (which memory-tool owns for SQLite reconcile).
+   * Listeners must not block; errors are swallowed. Returns an unsubscribe.
+   */
+  addMutationListener(fn: (target: "memory" | "user" | "failure") => void): () => void {
+    this.mutationListeners.add(fn);
+    return () => this.mutationListeners.delete(fn);
+  }
+
   setMutationObserver(
     fn: (target: "memory" | "user" | "failure", entries: string[]) => Promise<string | null | undefined>,
   ): void {
@@ -864,6 +876,16 @@ export class MemoryStore {
       if (result.evicted_count !== undefined) finalized.evicted_count = result.evicted_count;
       if (result.matches) finalized.matches = result.matches;
       if (result.entries) finalized.entries = result.entries;
+    }
+
+    if (finalized.success) {
+      for (const listener of this.mutationListeners) {
+        try {
+          listener(target);
+        } catch {
+          // A listener never fails the mutation.
+        }
+      }
     }
 
     if (!this.mutationObserver) return finalized;
