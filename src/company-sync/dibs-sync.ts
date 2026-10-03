@@ -321,12 +321,14 @@ export class DibsMemorySync {
         for (const text of texts()) {
           if (knownTexts.has(text) || rejected.has(text)) continue;
           try {
-            const created = await this.request<ServerEntry>("POST", "/api/agent/memory", {
+            const response = await this.request<{ entry?: ServerEntry } & Partial<ServerEntry>>("POST", "/api/agent/memory", {
               scope,
               ...(scope === "project" ? { repoKey } : {}),
               target,
               content: text,
             });
+            // dibs wraps the record: 201 {entry} when created, 200 {entry} when it already existed.
+            const created = response.entry ?? (response as ServerEntry);
             known[String(created.id)] = text;
             knownTexts.add(text);
           } catch (error) {

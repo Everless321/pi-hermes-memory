@@ -34,7 +34,7 @@ function fakeDibs(options: { linked?: boolean; me?: string } = {}) {
       }
       const entry: Entry = { id: nextId++, scope: body.scope, target: body.target, content: body.content, status: "active", owner: me, createdAt: "2026-10-01T00:00:00Z" };
       entries.push(entry);
-      return json(entry, 201);
+      return json({ entry }, 201);
     }
     if (method === "DELETE") {
       const entry = entries.find((e) => e.id === Number(url.pathname.split("/").pop()));
