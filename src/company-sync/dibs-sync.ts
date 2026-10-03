@@ -15,8 +15,11 @@
  * Scopes: the global store syncs as the caller's personal memory (`user`),
  * a repository-keyed project store as team memory (`project`) for that repo.
  *
- * Configuration: HERMES_DIBS_URL (e.g. http://192.168.110.241:8088) and
- * HERMES_DIBS_TOKEN (a dibs API token). Without both, nothing syncs.
+ * Configuration, read at the time of every request (a desktop host signs the
+ * user in after the extension has loaded): PI-Desktop hands
+ * { baseUrl, token } to the `pi.hermes-memory` extension through its
+ * `@pi-desktop/extension-host` module; otherwise HERMES_DIBS_URL and
+ * HERMES_DIBS_TOKEN. Without a base URL and a token, nothing syncs.
  */
 
 import { promises as fs } from "node:fs";
@@ -36,18 +39,43 @@ const STATE_FILE = ".dibs-sync.json";
 const REQUEST_TIMEOUT_MS = 8_000;
 const PUSH_DEBOUNCE_MS = 400;
 
+export type DibsEndpoint = { baseUrl: string; token: string };
+
 export type DibsSyncConfig = {
-  baseUrl: string;
-  token: string;
+  /** Current endpoint, or null when signed out. Called before every request. */
+  endpoint: () => DibsEndpoint | null;
   fetchImpl?: typeof fetch;
   log?: (level: "info" | "warn", message: string) => void;
   now?: () => Date;
 };
 
-export function resolveDibsSyncConfig(env: NodeJS.ProcessEnv = process.env): DibsSyncConfig | null {
-  const baseUrl = env.HERMES_DIBS_URL?.trim().replace(/\/+$/, "");
-  const token = env.HERMES_DIBS_TOKEN?.trim();
-  return baseUrl && token ? { baseUrl, token } : null;
+function cleanEndpoint(baseUrl: unknown, token: unknown): DibsEndpoint | null {
+  const url = typeof baseUrl === "string" ? baseUrl.trim().replace(/\/+$/, "") : "";
+  const secret = typeof token === "string" ? token.trim() : "";
+  return url && secret ? { baseUrl: url, token: secret } : null;
+}
+
+export function endpointFromEnv(env: NodeJS.ProcessEnv = process.env): DibsEndpoint | null {
+  return cleanEndpoint(env.HERMES_DIBS_URL, env.HERMES_DIBS_TOKEN);
+}
+
+/** The extension id PI-Desktop keys host-provided config by. */
+export const DESKTOP_EXTENSION_ID = "pi.hermes-memory";
+
+type DesktopHost = { getConfig?: (extensionId: string) => Record<string, unknown> | undefined };
+
+/**
+ * Endpoint provider for this process: PI-Desktop's host module when present
+ * (loaded once, read per call), otherwise the environment.
+ */
+export async function createEndpointProvider(env: NodeJS.ProcessEnv = process.env): Promise<() => DibsEndpoint | null> {
+  // PI-Desktop publishes its extension host on a global symbol (its loader
+  // maps only static imports, and a static import would fail everywhere else).
+  const host = (globalThis as Record<symbol, unknown>)[Symbol.for("pi-desktop.extension-host")] as DesktopHost | undefined;
+  return () => {
+    const config = host?.getConfig?.(DESKTOP_EXTENSION_ID);
+    return (config ? cleanEndpoint(config.baseUrl, config.token) : null) ?? endpointFromEnv(env);
+  };
 }
 
 type ServerEntry = {
@@ -125,11 +153,18 @@ export class DibsMemorySync {
     return this.config.now?.() ?? new Date();
   }
 
+  /** Whether a request could be made right now. */
+  get enabled(): boolean {
+    return this.config.endpoint() !== null;
+  }
+
   private async request<T>(method: string, apiPath: string, body?: unknown): Promise<T> {
-    const res = await this.fetch(`${this.config.baseUrl}${apiPath}`, {
+    const endpoint = this.config.endpoint();
+    if (!endpoint) throw new DibsHttpError(0, "NOT_CONFIGURED", "dibs is not configured");
+    const res = await this.fetch(`${endpoint.baseUrl}${apiPath}`, {
       method,
       headers: {
-        authorization: `Bearer ${this.config.token}`,
+        authorization: `Bearer ${endpoint.token}`,
         ...(body !== undefined ? { "content-type": "application/json" } : {}),
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -204,6 +239,7 @@ export class DibsMemorySync {
 
   private async reconcileNow(storeDir: string, scope: SyncScope, repoKey: string | null): Promise<void> {
     if (scope === "project" && !repoKey) return;
+    if (!this.enabled) return;
     const query = scope === "project" ? `?repoKey=${encodeURIComponent(repoKey!)}` : "";
     const remote = await this.request<{ project?: { id: number | string } | null; entries?: ServerEntry[] }>(
       "GET",

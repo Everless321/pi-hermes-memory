@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { DibsMemorySync, entryText } from "../../src/company-sync/dibs-sync.js";
+import { DibsMemorySync, createEndpointProvider, entryText } from "../../src/company-sync/dibs-sync.js";
 
 const REPO = "git:gitea.corp/team/api";
 type Entry = { id: number; scope: "project" | "user"; target: string; content: string; status: string; owner: string; createdAt: string };
@@ -64,7 +64,7 @@ describe("DibsMemorySync", () => {
   beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), "dibs-sync-")); });
   afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
   const sync = (dibs: ReturnType<typeof fakeDibs>) =>
-    new DibsMemorySync({ baseUrl: "http://dibs.test", token: "dibs_test", fetchImpl: dibs.fetchImpl, now: () => new Date("2026-10-03T00:00:00Z") });
+    new DibsMemorySync({ endpoint: () => ({ baseUrl: "http://dibs.test", token: "dibs_test" }), fetchImpl: dibs.fetchImpl, now: () => new Date("2026-10-03T00:00:00Z") });
 
   it("pulls team entries, pushes local ones once, and stays quiet when nothing changed", async () => {
     const dibs = fakeDibs();
@@ -144,5 +144,30 @@ describe("DibsMemorySync", () => {
     await s.flush(2000);
     assert.deepEqual(dibs.entries.map((e) => e.content).sort(), ["a", "b"]);
     assert.equal(dibs.calls.filter((c) => c.startsWith("GET")).length, 1, "two schedules, one reconcile");
+  });
+});
+
+describe("endpoint resolution", () => {
+  it("is read per request, and nothing syncs while signed out", async () => {
+    const dibs = fakeDibs();
+    let endpoint: { baseUrl: string; token: string } | null = null;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dibs-sync-late-"));
+    try {
+      const s = new DibsMemorySync({ endpoint: () => endpoint, fetchImpl: dibs.fetchImpl });
+      write(path.join(dir, "MEMORY.md"), ["late"]);
+      await s.reconcile(dir, "project", REPO);
+      assert.equal(dibs.calls.length, 0);
+      endpoint = { baseUrl: "http://dibs.test", token: "dibs_test" };
+      await s.reconcile(dir, "project", REPO);
+      assert.deepEqual(dibs.entries.map((e) => e.content), ["late"]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to the environment outside PI-Desktop", async () => {
+    const read = await createEndpointProvider({ HERMES_DIBS_URL: "http://dibs.test/", HERMES_DIBS_TOKEN: " dibs_x " });
+    assert.deepEqual(read(), { baseUrl: "http://dibs.test", token: "dibs_x" });
+    assert.equal((await createEndpointProvider({}))(), null);
   });
 });

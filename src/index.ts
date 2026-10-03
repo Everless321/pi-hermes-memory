@@ -61,7 +61,7 @@ import { AGENT_ROOT } from "./paths.js";
 import { isDatabaseMigrationPending } from "./extension-root-migration.js";
 import { measureLifecycle, measureLifecycleSync } from "./lifecycle-timing.js";
 import { createMemoryInitializer, withMemoryInitialization, type EnsureMemoryReady } from "./memory-initialization.js";
-import { DibsMemorySync, resolveDibsSyncConfig, type SyncScope } from "./company-sync/dibs-sync.js";
+import { DibsMemorySync, createEndpointProvider, type DibsEndpoint, type SyncScope } from "./company-sync/dibs-sync.js";
 
 export function resolveProjectSkillDiscovery(
   skillStore: SkillStore,
@@ -114,23 +114,28 @@ export default function (pi: ExtensionAPI) {
   const store = new MemoryStore({ ...config, memoryDir: globalDir });
   // Company memory sync (docs/company/repo-key.md): personal memory and
   // repository-keyed team memory are reconciled with dibs before each store
-  // loads and after each change. Off unless HERMES_DIBS_URL/TOKEN are set.
-  const dibsConfig = resolveDibsSyncConfig();
-  const companySync = dibsConfig
-    ? new DibsMemorySync({
-      ...dibsConfig,
-      log: (level, message) => (level === "warn" ? console.warn : console.info)(`[hermes-memory] ${message}`),
-    })
-    : null;
+  // loads and after each change. The endpoint is read per request, so a
+  // desktop sign-in after load still takes effect; signed out, nothing syncs.
+  let readEndpoint: () => DibsEndpoint | null = () => null;
+  const endpointReady = createEndpointProvider().then((provider) => {
+    readEndpoint = provider;
+  });
+  const companySync = new DibsMemorySync({
+    endpoint: () => readEndpoint(),
+    log: (level, message) => (level === "warn" ? console.warn : console.info)(`[hermes-memory] ${message}`),
+  });
   const COMPANY_SYNC_WAIT_MS = 5000;
   const syncBeforeLoad = async (dir: string, scope: SyncScope, repoKey: string | null): Promise<void> => {
-    if (!companySync) return;
+    await endpointReady;
+    if (!companySync.enabled) return;
     const sync = companySync.reconcile(dir, scope, repoKey).catch((error) => {
       console.warn(`[hermes-memory] dibs sync failed for ${scope} memory: ${String(error)}`);
     });
     await Promise.race([sync, new Promise((resolve) => setTimeout(resolve, COMPANY_SYNC_WAIT_MS).unref?.())]);
   };
-  if (companySync) store.addMutationListener(() => companySync.schedule(globalDir, "user"));
+  store.addMutationListener(() => {
+    if (companySync.enabled) companySync.schedule(globalDir, "user");
+  });
   // Factory may run with no session (Pi public contract). Do not snapshot
   // project identity from process.cwd() here — bind from session_start ctx.cwd
   // and from tool execute ctx.cwd.
@@ -195,8 +200,10 @@ export default function (pi: ExtensionAPI) {
       projectStore = createProjectStore(nextProject);
       const repoKey = nextProject.repo?.key ?? null;
       const syncedDir = nextProjectMemoryDir;
-      if (projectStore && companySync && repoKey && syncedDir) {
-        projectStore.addMutationListener(() => companySync.schedule(syncedDir, "project", repoKey));
+      if (projectStore && repoKey && syncedDir) {
+        projectStore.addMutationListener(() => {
+          if (companySync.enabled) companySync.schedule(syncedDir, "project", repoKey);
+        });
       }
       configureProjectStore(projectStore);
       configureMemoryToolProjectStore(projectStore);
@@ -455,7 +462,7 @@ export default function (pi: ExtensionAPI) {
   // DB-writing session_shutdown handler after this block — it would run after
   // close() and silently no-op.
   pi.on("session_shutdown", async (_event, ctx) => {
-    await companySync?.flush(3000);
+    await companySync.flush(3000);
     await initialization.close();
     if (lazy && !initialization.isReady()) {
       databaseClosed = true;

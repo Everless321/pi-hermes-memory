@@ -128,7 +128,9 @@ function renderView(
         : "";
       const fullSummary = `${partialPrefix}${view.summary}`;
       const hasHiddenText = view.expandedText.trim() !== view.summary.trim();
-      const hint = hasHiddenText ? ` (${keyHint("app.tools.expand", "to expand")})` : "";
+      // Hosts with a reduced pi-coding-agent shim (PI-Desktop) do not export keyHint.
+      const expandHint = typeof keyHint === "function" ? keyHint("app.tools.expand", "to expand") : "expand";
+      const hint = hasHiddenText ? ` (${expandHint})` : "";
       const hintWidth = visibleWidth(hint);
       const visibleHint = hintWidth < availableWidth ? hint : "";
       const summaryWidth = Math.max(1, availableWidth - visibleWidth(visibleHint));
