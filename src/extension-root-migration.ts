@@ -6,6 +6,7 @@ import { AtomicLockCoordinator, type AtomicLockLease } from "./store/atomic-lock
 import { canonicalStoragePathSync } from "./store/canonical-storage-path.js";
 import { createRequire } from "node:module";
 import { isBunRuntime, loadBetterSqlite3 } from "./store/sqlite-native.js";
+import { loadNodeSqliteDatabaseCtor } from "./store/node-sqlite-compat.js";
 
 type MigrationDatabase = {
   exec: (sql: string) => void;
@@ -107,7 +108,7 @@ function getDatabaseCtor(): MigrationDatabaseCtor {
   if (!cachedDatabaseCtor) {
     cachedDatabaseCtor = isBunRuntime()
       ? createBunMigrationDatabaseCtor()
-      : (loadBetterSqlite3() as MigrationDatabaseCtor);
+      : ((loadNodeSqliteDatabaseCtor(createRequire(import.meta.url)) ?? loadBetterSqlite3()) as MigrationDatabaseCtor);
   }
   return cachedDatabaseCtor;
 }

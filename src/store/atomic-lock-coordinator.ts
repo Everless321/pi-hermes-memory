@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { isBunRuntime, loadBetterSqlite3 } from './sqlite-native.js';
+import { loadNodeSqliteDatabaseCtor } from './node-sqlite-compat.js';
 
 type StatementLike = {
   run: (...args: unknown[]) => unknown;
@@ -53,7 +54,7 @@ function getDatabaseCtor(): DatabaseCtor {
       const bunSqlite = require('bun:sqlite') as { Database: DatabaseCtor };
       cachedDatabaseCtor = bunSqlite.Database;
     } else {
-      cachedDatabaseCtor = loadBetterSqlite3({ requireImpl: require }) as DatabaseCtor;
+      cachedDatabaseCtor = (loadNodeSqliteDatabaseCtor(require) ?? loadBetterSqlite3({ requireImpl: require })) as DatabaseCtor;
     }
   }
   return cachedDatabaseCtor;

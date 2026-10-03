@@ -8,7 +8,14 @@ import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import Database from 'better-sqlite3';
+import { createRequire } from 'node:module';
+import BetterSqlite3 from 'better-sqlite3';
+import { loadNodeSqliteDatabaseCtor } from '../../src/store/node-sqlite-compat.js';
+
+// Use the driver the code under test uses: two SQLite libraries in one
+// process do not see each other's file locks.
+const Database: typeof BetterSqlite3 =
+  loadNodeSqliteDatabaseCtor(createRequire(import.meta.url)) ?? BetterSqlite3;
 import { DatabaseManager } from '../../src/store/db.js';
 import {
   addMemory,

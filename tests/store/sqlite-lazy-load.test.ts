@@ -25,12 +25,18 @@ const POISON_REQUIRE = [
  * standing in for compiled Pi, whose Bun resolver cannot find the package from
  * an on-disk extension file.
  */
-function runWithoutBetterSqlite3(body: string): { status: number | null; output: string } {
+function runWithoutBetterSqlite3(
+  body: string,
+  env: NodeJS.ProcessEnv = {},
+): { status: number | null; output: string } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hermes-lazy-sqlite-"));
   try {
     const child = path.join(dir, "probe.mts");
     fs.writeFileSync(child, `${POISON_REQUIRE}\n${body}\n`);
-    const result = spawnSync(process.execPath, ["--import", "tsx", child], { encoding: "utf-8" });
+    const result = spawnSync(process.execPath, ["--import", "tsx", child], {
+      encoding: "utf-8",
+      env: { ...process.env, ...env },
+    });
     return { status: result.status, output: `${result.stdout ?? ""}${result.stderr ?? ""}` };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -62,7 +68,7 @@ describe("SQLite native loading is deferred past extension load", () => {
     assert.equal(status, 0);
   });
 
-  it("still fails loudly when SQLite is actually used", () => {
+  it("still fails loudly when the native driver is required and SQLite is actually used", () => {
     const body = [
       `const { AtomicLockCoordinator } = await import(${JSON.stringify(path.join(srcRoot, "store/atomic-lock-coordinator.ts"))});`,
       'const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hermes-lazy-sqlite-use-"));',
@@ -71,8 +77,22 @@ describe("SQLite native loading is deferred past extension load", () => {
 
     const { status, output } = runWithoutBetterSqlite3(
       `import fs from "node:fs";\nimport os from "node:os";\n${body}`,
+      { HERMES_SQLITE_DRIVER: "better-sqlite3" },
     );
     assert.notEqual(status, 0);
     assert.match(output, /better-sqlite3/);
+  });
+
+  it("falls back to node:sqlite when better-sqlite3 cannot be loaded", () => {
+    const body = [
+      `const { AtomicLockCoordinator } = await import(${JSON.stringify(path.join(srcRoot, "store/atomic-lock-coordinator.ts"))});`,
+      'const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hermes-node-sqlite-use-"));',
+      'const lease = new AtomicLockCoordinator(path.join(dir, "locks.sqlite")).tryAcquire("k", { staleMs: 1000 });',
+      'console.log(lease ? "ACQUIRED" : "NOT_ACQUIRED");',
+    ].join("\n");
+
+    const { status, output } = runWithoutBetterSqlite3(`import fs from "node:fs";\nimport os from "node:os";\n${body}`);
+    assert.equal(status, 0, output);
+    assert.match(output, /ACQUIRED/);
   });
 });

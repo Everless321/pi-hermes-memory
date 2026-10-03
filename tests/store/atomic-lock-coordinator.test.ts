@@ -4,7 +4,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import Database from 'better-sqlite3';
+import { createRequire } from 'node:module';
+import BetterSqlite3 from 'better-sqlite3';
+import { loadNodeSqliteDatabaseCtor } from '../../src/store/node-sqlite-compat.js';
+
+// Use the driver the code under test uses: two SQLite libraries in one
+// process do not see each other's file locks.
+const Database: typeof BetterSqlite3 =
+  loadNodeSqliteDatabaseCtor(createRequire(import.meta.url)) ?? BetterSqlite3;
 import { AtomicLockCoordinator } from '../../src/store/atomic-lock-coordinator.js';
 
 describe('AtomicLockCoordinator', () => {

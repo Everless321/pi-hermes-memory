@@ -5,6 +5,7 @@ import { SCHEMA_SQL } from './schema.js';
 import { AtomicLockCoordinator } from './atomic-lock-coordinator.js';
 import { canonicalStoragePathSync } from './canonical-storage-path.js';
 import { isBunRuntime, loadBetterSqlite3 } from './sqlite-native.js';
+import { loadNodeSqliteDatabaseCtor } from './node-sqlite-compat.js';
 import { measureLifecycleSync } from '../lifecycle-timing.js';
 import { MDSYNC_METADATA_KEY_PREFIX } from '../constants.js';
 
@@ -152,7 +153,7 @@ function getDatabaseCtor(): DatabaseCtor {
     const require = createRequire(import.meta.url);
     cachedDatabaseCtor = isBunRuntime()
       ? createBunCompatDatabaseCtor(require)
-      : (loadBetterSqlite3({ requireImpl: require }) as DatabaseCtor);
+      : ((loadNodeSqliteDatabaseCtor(require) ?? loadBetterSqlite3({ requireImpl: require })) as DatabaseCtor);
   }
   return cachedDatabaseCtor;
 }
