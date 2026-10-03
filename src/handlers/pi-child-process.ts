@@ -429,6 +429,11 @@ async function writePromptToTemporaryFile(prompt: string): Promise<{ dir: string
   }
 }
 
+/** PI-Desktop publishes its extension host on this global symbol. */
+function insidePiDesktop(): boolean {
+  return Symbol.for("pi-desktop.extension-host") in globalThis;
+}
+
 export async function execChildPrompt(
   pi: Pick<ExtensionAPI, "exec">,
   prompt: string,
@@ -436,6 +441,11 @@ export async function execChildPrompt(
   options: ExecChildPromptOptions,
   dependencies: ExecChildPromptDependencies = DEFAULT_EXEC_CHILD_PROMPT_DEPENDENCIES,
 ): Promise<PiExecResult> {
+  if (insidePiDesktop()) {
+    // PI-Desktop ships no pi CLI, and the review fallback would otherwise
+    // launch whatever `pi` is on PATH with the user's own configuration.
+    throw new Error("PI-Desktop has no pi CLI to run the fallback");
+  }
   const execOptions = {
     cwd: options.cwd,
     timeout: options.timeoutMs + WATCHDOG_EXIT_GRACE_MS,

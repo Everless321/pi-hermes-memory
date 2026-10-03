@@ -436,6 +436,21 @@ describe("resolveChildPiInvocation", () => {
 });
 
 describe("execChildPrompt", () => {
+  it("refuses inside PI-Desktop, which has no pi CLI", async () => {
+    const key = Symbol.for("pi-desktop.extension-host");
+    (globalThis as Record<symbol, unknown>)[key] = {};
+    let ran = false;
+    try {
+      await assert.rejects(
+        execChildPrompt({ exec: async () => { ran = true; return { code: 0 }; } } as any, "p", {}, { timeoutMs: 1000 }),
+        /no pi CLI/,
+      );
+      assert.equal(ran, false);
+    } finally {
+      delete (globalThis as Record<symbol, unknown>)[key];
+    }
+  });
+
   it("runs child Pi behind a hard process-tree watchdog", async () => {
     const calls: Array<{ cmd: string; args: string[]; timeout?: number }> = [];
     await execChildPrompt({

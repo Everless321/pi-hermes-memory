@@ -5,7 +5,10 @@
 import { build } from "esbuild";
 import { fileURLToPath } from "node:url";
 
-const outfile = process.argv[2] ?? fileURLToPath(new URL("../dist/desktop/index.mjs", import.meta.url));
+// The output is plain ESM JavaScript; PI-Desktop names it `.mts` so its jiti
+// loader transpiles it and resolves the host packages to its virtual modules
+// (a `.mjs` file is imported natively and bypasses them).
+const outfile = process.argv[2] ?? fileURLToPath(new URL("../dist/desktop/index.mts", import.meta.url));
 await build({
   entryPoints: [fileURLToPath(new URL("../src/index.ts", import.meta.url))],
   outfile,
