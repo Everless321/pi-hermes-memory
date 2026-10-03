@@ -6,13 +6,17 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { createHash } from "node:crypto";
 import { resolveProjectsRoot } from "./paths.js";
+import { detectRepository, type RepositoryIdentity } from "./vcs-identity.js";
 
 export interface ProjectInfo {
   /** Project name (directory basename), or null if not in a project. */
   name: string | null;
   /** Path to the project-scoped memory directory, or null. */
   memoryDir: string | null;
+  /** The source repository this project is keyed by, when it has a remote. */
+  repo?: RepositoryIdentity | null;
 }
 
 export interface ProjectSkillInfo extends ProjectInfo {
@@ -80,6 +84,39 @@ function resolveWorktreeCommonDir(worktreeRoot: string, dotGitFile: string): str
 }
 
 const repoRootCache = new Map<string, string | null>();
+const repositoryCache = new Map<string, RepositoryIdentity | null>();
+
+function cachedRepository(dir: string, homeDir: string): RepositoryIdentity | null {
+  if (!repositoryCache.has(dir)) repositoryCache.set(dir, detectRepository(dir, { homeDir }));
+  return repositoryCache.get(dir) ?? null;
+}
+
+/**
+ * Local directory name for a repository-keyed project: the repository's last
+ * path segment, made filesystem-safe, plus a short hash of the repo key so two
+ * repositories with the same name never share a store.
+ */
+export function repositoryProjectName(repo: RepositoryIdentity): string {
+  const lastSegment = repo.key.slice(repo.key.lastIndexOf("/") + 1);
+  const readable = lastSegment.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[-.]+|-+$/g, "") || "repo";
+  return `${readable}-${createHash("sha256").update(repo.key).digest("hex").slice(0, 8)}`;
+}
+
+/**
+ * Carry a store written under the folder-name identity of earlier releases
+ * over to the repository identity, once, so upgrading never orphans memory.
+ */
+function adoptLegacyProjectStore(projectsRoot: string, legacyName: string, name: string): void {
+  const target = path.join(projectsRoot, name);
+  const legacy = path.join(projectsRoot, legacyName);
+  if (legacyName === name || fs.existsSync(target) || !fs.existsSync(legacy)) return;
+  try {
+    fs.renameSync(legacy, target);
+  } catch {
+    // Another process adopted it first, or the rename is not possible; the
+    // repository store simply starts empty.
+  }
+}
 
 /**
  * Detect project from the current working directory.
@@ -114,11 +151,18 @@ export function detectProject(projectsMemoryDir = "projects-memory", cwd?: strin
   }
 
   const projectsRoot = resolveProjectsRoot(projectsMemoryDir);
+  const repo = cachedRepository(resolved, resolvedHome);
+  if (repo) {
+    const name = repositoryProjectName(repo);
+    adoptLegacyProjectStore(projectsRoot, path.basename(repo.root), name);
+    return { name, memoryDir: path.join(projectsRoot, name), repo };
+  }
   const name = resolveProjectName(resolved, resolvedHome, cwdName, projectsRoot);
 
   return {
     name,
     memoryDir: path.join(projectsRoot, name),
+    repo: null,
   };
 }
 
