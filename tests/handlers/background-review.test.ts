@@ -801,6 +801,35 @@ describe("setupBackgroundReview", () => {
     });
   });
 
+  it("cleans model-scope startup warnings before reporting subprocess failures", async () => {
+    const scopeWarnings = Array.from({ length: 8 }, (_, index) =>
+      `\u001b[33mWarning: No models match pattern "test/model-${index}"\u001b[39m`,
+    ).join("\n");
+    const pi = createMockPi({
+      code: 1,
+      stdout: "",
+      stderr: `${scopeWarnings}\n\u001b[31mError: Provider credit balance exhausted\u001b[39m`,
+    });
+    setupWithDirectDeps(pi, { ok: false, appliedCount: 0, fallbackReason: "no_auth" }, {
+      ...defaultConfig,
+      reviewTransport: "direct",
+    } as MemoryConfig);
+
+    fireMessageEnd("user");
+    fireMessageEnd("user");
+    fireMessageEnd("user");
+    for (let i = 0; i < 10; i++) {
+      fireTurnEnd(makeBranch(10));
+    }
+    await reviewSettledSignal.promise;
+
+    const failures = notifyCalls.filter((n) => n.level === "warning");
+    assert.equal(failures.length, 1);
+    assert.match(failures[0].msg, /Provider credit balance exhausted/);
+    assert.doesNotMatch(failures[0].msg, /Warning: No models match pattern/);
+    assert.doesNotMatch(failures[0].msg, /\u001b\[/);
+  });
+
   it("surfaces one actionable diagnostic when direct and subprocess review both fail", async () => {
     const pi = createMockPi({ code: 1, stdout: "", stderr: "No API key for local-llama/local-9b" });
     setupWithDirectDeps(pi, {

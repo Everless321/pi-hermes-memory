@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildChildPiPromptArgs,
+  cleanChildStderr,
   detectAuthAdapterExtensionPaths,
   execChildPrompt,
   inheritedExtensionArgs,
@@ -901,5 +902,62 @@ describe("execChildPrompt", () => {
 
     assert.strictEqual(result.code, 1);
     assert.strictEqual(calls.length, 1);
+  });
+});
+
+describe("cleanChildStderr", () => {
+  const scopeWarnings = Array.from(
+    { length: 8 },
+    (_, index) => `Warning: No models match pattern "test/model-${index}"`,
+  ).join("\n");
+
+  const cases: Array<{ name: string; stderr: string; expected: string }> = [
+    {
+      name: "reports an HTTP 402 after long model-scope warnings",
+      stderr: `${scopeWarnings}\nError: HTTP402 Credit balance is empty`,
+      expected: "Error: HTTP402 Credit balance is empty",
+    },
+    {
+      name: "strips ANSI codes before filtering model-scope warnings",
+      stderr: `\u001b[33mWarning: No models match pattern "test/model"\u001b[39m\n\u001b[31mError: HTTP402 Credit balance is empty\u001b[39m`,
+      expected: "Error: HTTP402 Credit balance is empty",
+    },
+    {
+      name: "preserves model-scope warnings when they are the only diagnostics",
+      stderr: 'Warning: No models match pattern "test/model"',
+      expected: 'Warning: No models match pattern "test/model"',
+    },
+    {
+      name: "retains unrelated warning lines",
+      stderr: "Warning: Extension discovery used its fallback path\nError: HTTP402 Credit balance is empty",
+      expected: "Warning: Extension discovery used its fallback path\nError: HTTP402 Credit balance is empty",
+    },
+    {
+      name: "does not discard model-not-found errors",
+      stderr: `${scopeWarnings}\nError: Model not found`,
+      expected: "Error: Model not found",
+    },
+    {
+      name: "returns empty stderr unchanged for caller-side fallback",
+      stderr: "",
+      expected: "",
+    },
+    {
+      name: "preserves long cleaned stderr for caller-side formatting",
+      stderr: `Warning: No models match pattern "test/model"\nError: ${"x".repeat(250)}`,
+      expected: `Error: ${"x".repeat(250)}`,
+    },
+  ];
+
+  for (const { name, stderr, expected } of cases) {
+    it(name, () => {
+      const cleaned = cleanChildStderr(stderr);
+      assert.equal(cleaned, expected);
+      if (expected.length > 200) assert.ok(cleaned.length > 200);
+    });
+  }
+
+  it("returns an empty string when stderr is absent", () => {
+    assert.equal(cleanChildStderr(), "");
   });
 });

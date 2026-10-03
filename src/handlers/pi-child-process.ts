@@ -4,6 +4,7 @@ import * as os from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import stripAnsi from "strip-ansi";
 import type { MemoryConfig, ThinkingLevel } from "../types.js";
 import { AGENT_ROOT } from "../paths.js";
 
@@ -14,6 +15,16 @@ interface PiExecResult {
   stdout?: string;
   stderr?: string;
   killed?: boolean;
+}
+
+export function cleanChildStderr(stderr?: string): string {
+  const originalStderr = stripAnsi(stderr ?? "").trim();
+  return originalStderr
+    .split(/\r?\n/)
+    // Pi model-resolver.js emits these model-scope warnings during child startup.
+    .filter((line) => !line.startsWith("Warning: No models match pattern "))
+    .join("\n")
+    .trim() || originalStderr;
 }
 
 export interface ChildPiModel {

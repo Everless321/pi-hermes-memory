@@ -386,6 +386,22 @@ describe("triggerConsolidation", () => {
     assert.ok(result.error!.includes("exit"), "error should mention exit code");
   });
 
+  it("reports bounded fatal stderr after long model-scope startup warnings", async () => {
+    const scopeWarnings = Array.from(
+      { length: 8 },
+      (_, index) => `Warning: No models match pattern "test/model-${index}"`,
+    ).join("\n");
+    const fatalError = `Error: HTTP402 Credit balance is empty; details: ${"x".repeat(250)}`;
+    const result = await triggerConsolidation(
+      createMockPi({ code: 1, stdout: "", stderr: `${scopeWarnings}\n${fatalError}` }),
+      mockStore,
+      "memory",
+    );
+
+    assert.strictEqual(result.consolidated, false);
+    assert.strictEqual(result.error, `Consolidation process exited with code 1: ${fatalError.slice(0, 200)}`);
+  });
+
   it("surfaces timeout-style child termination clearly", async () => {
     const pi = createMockPi({ code: 143, stdout: "", stderr: "", killed: true } as any);
     const result = await triggerConsolidation(pi, mockStore, "memory", undefined, 60000);

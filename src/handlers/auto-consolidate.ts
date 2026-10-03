@@ -33,7 +33,7 @@ import {
 } from "../constants.js";
 import type { ConsolidationResult, MemoryConfig } from "../types.js";
 import { AGENT_ROOT } from "../paths.js";
-import { execChildPrompt } from "./pi-child-process.js";
+import { cleanChildStderr, execChildPrompt } from "./pi-child-process.js";
 import { runDirectMemoryCompletion, usesDirectTransport, type DirectReviewContext } from "./review-memory-ops.js";
 import { AtomicLockCoordinator } from "../store/atomic-lock-coordinator.js";
 
@@ -158,14 +158,14 @@ function describeConsolidationFailure(
   result: { code: number; stderr?: string; killed?: boolean },
   timeoutMs: number,
 ): string {
-  const stderr = result.stderr?.trim();
+  const stderr = cleanChildStderr(result.stderr);
   const terminated = result.killed || result.code === 124 || result.code === 143;
 
   if (terminated) {
     return `Consolidation subprocess was terminated (likely timeout or cancellation). Timeout: ${timeoutMs}ms. Raise consolidationTimeoutMs if consolidation legitimately needs longer.`;
   }
 
-  return `Consolidation process exited with code ${result.code}: ${stderr?.slice(0, 200) || "unknown error"}`;
+  return `Consolidation process exited with code ${result.code}: ${stderr.slice(0, 200) || "unknown error"}`;
 }
 
 function buildConsolidationPrompt(
